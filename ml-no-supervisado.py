@@ -26,7 +26,7 @@ def load_data_and_analyzer():
     """Carga los datos y inicializa el analizador."""
     # En una implementación real, esto cargaría el dataset real
     # Aquí creamos datos de ejemplo para demostración
-    data_path = "data/Methane_final.csv"
+    data_path = "data/global_emissions.csv"
     return MethaneEmissionsAnalyzer(data_path)
 
 analyzer = load_data_and_analyzer()

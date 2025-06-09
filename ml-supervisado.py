@@ -1,1264 +1,670 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# Machine Learning
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+from sklearn.naive_bayes import GaussianNB
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, 
+                            f1_score, classification_report, confusion_matrix)
+
 import warnings
 warnings.filterwarnings('ignore')
 
-class DiabetesClassificationSystem:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Sistema de Clasificación de Diabetes - ML")
-        self.root.geometry("1000x700")
-        
-        # Colores Catppuccin Mocha
-        self.colors = {
-            'base': '#1e1e2e',
-            'mantle': '#181825', 
-            'crust': '#11111b',
-            'text': '#cdd6f4',
-            'subtext0': '#a6adc8',
-            'subtext1': '#bac2de',
-            'surface0': '#313244',
-            'surface1': '#45475a',
-            'surface2': '#585b70',
-            'blue': '#89b4fa',
-            'lavender': '#b4befe',
-            'green': '#a6e3a1',
-            'yellow': '#f9e2af',
-            'peach': '#fab387',
-            'red': '#f38ba8',
-            'mauve': '#cba6f7',
-            'pink': '#f5c2e7',
-            'teal': '#94e2d5'
-        }
-        
-        # Configurar tema oscuro
-        self.setup_theme()
-        
-        # Variables de control
-        self.data = None
-        self.data_clean = None
-        self.missing_info = {}
-        self.preprocessing_done = False
+# Configuración de la página
+st.set_page_config(
+    page_title="🏥 Predictor de Medicamentos",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+class DrugPredictionSystem:
+    """
+    Sistema completo de predicción de medicamentos usando modelos de caja blanca.
+    Diseñado para principiantes en Machine Learning.
+    """
+    
+    def __init__(self):
+        self.models = {}
+        self.best_models = {}
+        self.scalers = {}
+        self.encoders = {}
         self.X_train = None
         self.X_test = None
         self.y_train = None
         self.y_test = None
-        self.scaler = StandardScaler()
-        self.imputer = None
-        self.models_results = {}
+        self.feature_names = None
+        self.target_names = None
         
-        # Configuración de modelos de caja blanca con hiperparámetros
-        self.models_config = {
+    def load_and_preprocess_data(self, df):
+        """
+        Carga y preprocesa los datos del dataset de medicamentos.
+        
+        Args:
+            df: DataFrame con los datos del dataset
+            
+        Returns:
+            X_processed, y_processed: Datos preprocesados
+        """
+        st.subheader("📊 Análisis Exploratorio de Datos")
+        
+        # Mostrar información básica del dataset
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Número de Pacientes", len(df))
+        with col2:
+            st.metric("Características", len(df.columns) - 1)
+        with col3:
+            st.metric("Tipos de Medicamentos", df['Drug'].nunique())
+        
+        # Mostrar distribución de medicamentos
+        fig_dist = px.pie(df, names='Drug', title="Distribución de Tipos de Medicamentos")
+        st.plotly_chart(fig_dist, use_container_width=True)
+        
+        # Preparar los datos
+        X = df.drop('Drug', axis=1)
+        y = df['Drug']
+        
+        # Codificar variables categóricas
+        le_sex = LabelEncoder()
+        le_bp = LabelEncoder()
+        le_chol = LabelEncoder()
+        le_drug = LabelEncoder()
+        
+        X_processed = X.copy()
+        X_processed['Sex'] = le_sex.fit_transform(X['Sex'])
+        X_processed['BP'] = le_bp.fit_transform(X['BP'])
+        X_processed['Cholesterol'] = le_chol.fit_transform(X['Cholesterol'])
+        
+        y_processed = le_drug.fit_transform(y)
+        
+        # Guardar encoders para uso posterior
+        self.encoders = {
+            'sex': le_sex,
+            'bp': le_bp,
+            'cholesterol': le_chol,
+            'drug': le_drug
+        }
+        
+        self.feature_names = X.columns.tolist()
+        self.target_names = le_drug.classes_
+        
+        # Matriz de correlación
+        st.subheader("🔗 Matriz de Correlación")
+        corr_matrix = X_processed.corr()
+        fig_corr = px.imshow(corr_matrix, 
+                            text_auto=True, 
+                            aspect="auto",
+                            title="Correlación entre Características")
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        return X_processed, y_processed
+    
+    def split_and_scale_data(self, X, y):
+        """
+        Divide y escala los datos para entrenamiento y prueba.
+        """
+        # División 80/20
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Escalado de características
+        scaler = StandardScaler()
+        self.X_train_scaled = scaler.fit_transform(self.X_train)
+        self.X_test_scaled = scaler.transform(self.X_test)
+        
+        self.scalers['standard'] = scaler
+        
+        st.success(f"✅ Datos divididos: {len(self.X_train)} entrenamiento, {len(self.X_test)} prueba")
+        
+    def define_models_and_grids(self):
+        """
+        Define los modelos de caja blanca y sus grids de hiperparámetros.
+        """
+        self.models = {
             'Decision Tree': {
                 'model': DecisionTreeClassifier(random_state=42),
-                'params': {
+                'param_grid': {
                     'max_depth': [3, 5, 7, 10, None],
                     'min_samples_split': [2, 5, 10],
                     'min_samples_leaf': [1, 2, 4],
                     'criterion': ['gini', 'entropy']
-                }
+                },
+                'use_scaled': False
             },
             'Logistic Regression': {
                 'model': LogisticRegression(random_state=42, max_iter=1000),
-                'params': {
+                'param_grid': {
                     'C': [0.1, 1.0, 10.0, 100.0],
                     'penalty': ['l1', 'l2'],
                     'solver': ['liblinear', 'saga']
-                }
+                },
+                'use_scaled': True
             },
-            'Random Forest': {
-                'model': RandomForestClassifier(random_state=42),
-                'params': {
-                    'n_estimators': [50, 100, 200],
-                    'max_depth': [3, 5, 7, None],
-                    'min_samples_split': [2, 5, 10],
-                    'min_samples_leaf': [1, 2, 4]
-                }
+            'Naive Bayes': {
+                'model': GaussianNB(),
+                'param_grid': {
+                    'var_smoothing': [1e-9, 1e-8, 1e-7, 1e-6, 1e-5]
+                },
+                'use_scaled': True
             }
         }
         
-        self.setup_ui()
-    
-    def setup_theme(self):
-        """Configurar tema Catppuccin Mocha"""
-        style = ttk.Style()
-        style.theme_use('clam')
+    def train_models_with_grid_search(self):
+        """
+        Entrena todos los modelos usando Grid Search y validación cruzada.
+        """
+        st.subheader("🎯 Entrenamiento de Modelos con Grid Search")
         
-        # Configurar colores del tema
-        style.configure('TFrame', background=self.colors['base'])
-        style.configure('TLabel', background=self.colors['base'], foreground=self.colors['text'], 
-                       font=('SF Pro Display', 10))
-        style.configure('Title.TLabel', background=self.colors['base'], foreground=self.colors['blue'], 
-                       font=('SF Pro Display', 20, 'bold'))
-        style.configure('Heading.TLabel', background=self.colors['base'], foreground=self.colors['lavender'], 
-                       font=('SF Pro Display', 12, 'bold'))
-        style.configure('Subheading.TLabel', background=self.colors['base'], foreground=self.colors['subtext1'], 
-                       font=('SF Pro Display', 10))
+        results = {}
+        progress_bar = st.progress(0)
         
-        # Botones modernos
-        style.configure('Primary.TButton', 
-                       background=self.colors['blue'],
-                       foreground=self.colors['base'],
-                       font=('SF Pro Display', 10, 'bold'),
-                       relief='flat',
-                       borderwidth=0,
-                       focuscolor='none')
-        style.map('Primary.TButton',
-                 background=[('active', self.colors['lavender']),
-                           ('pressed', self.colors['surface2'])])
-        
-        style.configure('Secondary.TButton', 
-                       background=self.colors['surface1'],
-                       foreground=self.colors['text'],
-                       font=('SF Pro Display', 10),
-                       relief='flat',
-                       borderwidth=0,
-                       focuscolor='none')
-        style.map('Secondary.TButton',
-                 background=[('active', self.colors['surface2']),
-                           ('pressed', self.colors['surface0'])])
-        
-        # Checkbuttons y Radiobuttons
-        style.configure('TCheckbutton', background=self.colors['base'], foreground=self.colors['text'],
-                       font=('SF Pro Display', 10), focuscolor='none')
-        style.map('TCheckbutton', background=[('active', self.colors['base'])])
-        
-        style.configure('TRadiobutton', background=self.colors['base'], foreground=self.colors['text'],
-                       font=('SF Pro Display', 10), focuscolor='none')
-        style.map('TRadiobutton', background=[('active', self.colors['base'])])
-        
-        # Notebook
-        style.configure('TNotebook', background=self.colors['base'], borderwidth=0)
-        style.configure('TNotebook.Tab', background=self.colors['surface1'], foreground=self.colors['text'],
-                       padding=[12, 8], font=('SF Pro Display', 10))
-        style.map('TNotebook.Tab', 
-                 background=[('selected', self.colors['blue']),
-                           ('active', self.colors['surface2'])],
-                 foreground=[('selected', self.colors['base'])])
-        
-        # Configurar ventana principal
-        self.root.configure(bg=self.colors['base'])
-    
-    def create_card_frame(self, parent, **kwargs):
-        """Crear un frame con estilo de tarjeta moderna"""
-        card = tk.Frame(parent, bg=self.colors['surface0'], relief='flat', bd=0, **kwargs)
-        return card
-    
-    def update_progress_bar(self, value):
-        """Actualizar barra de progreso personalizada"""
-        try:
-            if hasattr(self, 'progress_fill') and self.progress_fill.master.winfo_exists():
-                parent_width = self.progress_fill.master.winfo_width()
-                if parent_width > 1:  # Asegurar que el widget esté renderizado
-                    new_width = int((value / 100) * parent_width)
-                    self.progress_fill.place_configure(width=new_width)
-                    self.root.update_idletasks()
-        except Exception:
-            # Si hay error con la barra de progreso, simplemente ignorar
-            pass
-    
-    def setup_ui(self):
-        # Frame principal con padding
-        main_frame = tk.Frame(self.root, bg=self.colors['base'])
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
-        
-        # Header con título
-        header_frame = self.create_card_frame(main_frame)
-        header_frame.pack(fill='x', pady=(0, 20))
-        
-        title_label = tk.Label(header_frame, text="🧬 Sistema de Clasificación de Diabetes", 
-                              bg=self.colors['surface0'], fg=self.colors['blue'],
-                              font=('SF Pro Display', 24, 'bold'))
-        title_label.pack(pady=20)
-        
-        subtitle_label = tk.Label(header_frame, text="Análisis Predictivo con Modelos de Machine Learning Interpretables", 
-                                 bg=self.colors['surface0'], fg=self.colors['subtext1'],
-                                 font=('SF Pro Display', 12))
-        subtitle_label.pack(pady=(0, 20))
-        
-        # Container principal con scroll
-        canvas = tk.Canvas(main_frame, bg=self.colors['base'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg=self.colors['base'])
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Sección 1: Carga de datos
-        data_card = self.create_card_frame(scrollable_frame)
-        data_card.pack(fill='x', pady=(0, 15))
-        
-        data_header = tk.Frame(data_card, bg=self.colors['surface0'])
-        data_header.pack(fill='x', padx=20, pady=15)
-        
-        tk.Label(data_header, text="📊 Carga de Dataset", 
-                bg=self.colors['surface0'], fg=self.colors['green'],
-                font=('SF Pro Display', 14, 'bold')).pack(anchor='w')
-        
-        tk.Label(data_header, text="Seleccione su archivo CSV con datos clínicos de diabetes", 
-                bg=self.colors['surface0'], fg=self.colors['subtext1'],
-                font=('SF Pro Display', 10)).pack(anchor='w', pady=(5, 0))
-        
-        data_controls = tk.Frame(data_card, bg=self.colors['surface0'])
-        data_controls.pack(fill='x', padx=20, pady=(0, 20))
-        
-        button_frame = tk.Frame(data_controls, bg=self.colors['surface0'])
-        button_frame.pack(fill='x', pady=10)
-        
-        self.load_button = tk.Button(button_frame, text="📁 Seleccionar Archivo", 
-                                    command=self.load_data,
-                                    bg=self.colors['blue'], fg=self.colors['base'],
-                                    font=('SF Pro Display', 11, 'bold'),
-                                    relief='flat', bd=0, padx=20, pady=12,
-                                    cursor='hand2')
-        self.load_button.pack(side='left')
-        
-        self.data_info_label = tk.Label(button_frame, text="No se ha cargado ningún dataset",
-                                       bg=self.colors['surface0'], fg=self.colors['subtext0'],
-                                       font=('SF Pro Display', 10))
-        self.data_info_label.pack(side='left', padx=(20, 0))
-        
-        # Sección 2: Configuración
-        config_card = self.create_card_frame(scrollable_frame)
-        config_card.pack(fill='x', pady=(0, 15))
-        
-        config_header = tk.Frame(config_card, bg=self.colors['surface0'])
-        config_header.pack(fill='x', padx=20, pady=15)
-        
-        tk.Label(config_header, text="⚙️ Configuración del Modelo", 
-                bg=self.colors['surface0'], fg=self.colors['yellow'],
-                font=('SF Pro Display', 14, 'bold')).pack(anchor='w')
-        
-        config_content = tk.Frame(config_card, bg=self.colors['surface0'])
-        config_content.pack(fill='x', padx=20, pady=(0, 20))
-        
-        # Tipo de clasificación
-        classification_frame = tk.Frame(config_content, bg=self.colors['surface0'])
-        classification_frame.pack(fill='x', pady=10)
-        
-        tk.Label(classification_frame, text="Tipo de Clasificación:", 
-                bg=self.colors['surface0'], fg=self.colors['text'],
-                font=('SF Pro Display', 11, 'bold')).pack(anchor='w')
-        
-        self.binary_var = tk.BooleanVar(value=True)
-        self.binary_check = tk.Checkbutton(classification_frame, 
-                                          text="Clasificación Binaria (Diabetes/No Diabetes)", 
-                                          variable=self.binary_var,
-                                          bg=self.colors['surface0'], fg=self.colors['text'],
-                                          selectcolor=self.colors['surface1'],
-                                          activebackground=self.colors['surface0'],
-                                          font=('SF Pro Display', 10))
-        self.binary_check.pack(anchor='w', pady=5)
-        
-        # Estrategia de imputación
-        imputation_frame = tk.Frame(config_content, bg=self.colors['surface0'])
-        imputation_frame.pack(fill='x', pady=15)
-        
-        tk.Label(imputation_frame, text="Estrategia para Valores Faltantes:", 
-                bg=self.colors['surface0'], fg=self.colors['text'],
-                font=('SF Pro Display', 11, 'bold')).pack(anchor='w')
-        
-        self.imputation_var = tk.StringVar(value="mean")
-        
-        radio_container = tk.Frame(imputation_frame, bg=self.colors['surface0'])
-        radio_container.pack(fill='x', pady=5)
-        
-        radio_options = [
-            ("Media/Moda", "mean"),
-            ("Mediana/Moda", "median"), 
-            ("KNN (k=5)", "knn"),
-            ("Eliminar filas", "drop")
-        ]
-        
-        for i, (text, value) in enumerate(radio_options):
-            radio = tk.Radiobutton(radio_container, text=text, variable=self.imputation_var, 
-                                  value=value, bg=self.colors['surface0'], fg=self.colors['text'],
-                                  selectcolor=self.colors['blue'], activebackground=self.colors['surface0'],
-                                  font=('SF Pro Display', 10))
-            radio.pack(side='left', padx=(0, 20))
-        
-        # Botones de acción
-        action_frame = tk.Frame(config_card, bg=self.colors['surface0'])
-        action_frame.pack(fill='x', padx=20, pady=(0, 20))
-        
-        button_container = tk.Frame(action_frame, bg=self.colors['surface0'])
-        button_container.pack(fill='x')
-        
-        self.preprocess_button = tk.Button(button_container, text="🔄 Preprocesar Datos", 
-                                          command=self.start_preprocessing, state='disabled',
-                                          bg=self.colors['teal'], fg=self.colors['base'],
-                                          font=('SF Pro Display', 11, 'bold'),
-                                          relief='flat', bd=0, padx=20, pady=12,
-                                          cursor='hand2')
-        self.preprocess_button.pack(side='left', padx=(0, 15))
-        
-        self.preprocess_info_label = tk.Label(button_container, text="",
-                                             bg=self.colors['surface0'], fg=self.colors['subtext0'],
-                                             font=('SF Pro Display', 10))
-        self.preprocess_info_label.pack(side='left')
-        
-        self.train_button = tk.Button(button_container, text="🚀 Entrenar Modelos", 
-                                     command=self.start_training, state='disabled',
-                                     bg=self.colors['green'], fg=self.colors['base'],
-                                     font=('SF Pro Display', 11, 'bold'),
-                                     relief='flat', bd=0, padx=20, pady=12,
-                                     cursor='hand2')
-        self.train_button.pack(side='right')
-        
-        # Sección 3: Progreso
-        progress_card = self.create_card_frame(scrollable_frame)
-        progress_card.pack(fill='x', pady=(0, 15))
-        
-        progress_header = tk.Frame(progress_card, bg=self.colors['surface0'])
-        progress_header.pack(fill='x', padx=20, pady=15)
-        
-        tk.Label(progress_header, text="📈 Progreso del Entrenamiento", 
-                bg=self.colors['surface0'], fg=self.colors['peach'],
-                font=('SF Pro Display', 14, 'bold')).pack(anchor='w')
-        
-        progress_content = tk.Frame(progress_card, bg=self.colors['surface0'])
-        progress_content.pack(fill='x', padx=20, pady=(0, 20))
-        
-        self.progress_var = tk.StringVar(value="Esperando inicio de entrenamiento...")
-        self.progress_label = tk.Label(progress_content, textvariable=self.progress_var,
-                                      bg=self.colors['surface0'], fg=self.colors['text'],
-                                      font=('SF Pro Display', 10))
-        self.progress_label.pack(anchor='w', pady=(0, 10))
-        
-        # Progress bar personalizada
-        progress_bg = tk.Frame(progress_content, bg=self.colors['surface1'], height=8)
-        progress_bg.pack(fill='x', pady=5)
-        
-        self.progress_fill = tk.Frame(progress_bg, bg=self.colors['blue'], height=8)
-        self.progress_fill.place(x=0, y=0, width=0, height=8)
-        
-        # Sección 4: Resultados
-        results_card = self.create_card_frame(scrollable_frame)
-        results_card.pack(fill='both', expand=True, pady=(0, 0))
-        
-        results_header = tk.Frame(results_card, bg=self.colors['surface0'])
-        results_header.pack(fill='x', padx=20, pady=15)
-        
-        tk.Label(results_header, text="📊 Resultados de Evaluación", 
-                bg=self.colors['surface0'], fg=self.colors['mauve'],
-                font=('SF Pro Display', 14, 'bold')).pack(anchor='w')
-        
-        # Notebook para resultados
-        notebook_frame = tk.Frame(results_card, bg=self.colors['surface0'])
-        notebook_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
-        
-        self.results_notebook = ttk.Notebook(notebook_frame)
-        self.results_notebook.pack(fill='both', expand=True)
-        
-        # Configurar el canvas
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Configurar scroll con rueda del mouse
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind("<MouseWheel>", on_mousewheel)
-    
-    def load_data(self):
-        """Función para cargar y analizar el dataset de diabetes incluyendo valores faltantes"""
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar Dataset CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        
-        if file_path:
-            try:
-                self.data = pd.read_csv(file_path)
-                
-                # Verificación de columnas requeridas
-                required_columns = ['Gender', 'AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 
-                                  'TG', 'HDL', 'LDL', 'VLDL', 'BMI', 'CLASS']
-                
-                if not all(col in self.data.columns for col in required_columns):
-                    messagebox.showerror("Error", "El dataset no contiene todas las columnas requeridas")
-                    return
-                
-                # Análisis de valores faltantes
-                self.missing_info = self.analyze_missing_values()
-                
-                # Información del dataset
-                total_missing = sum(self.missing_info.values())
-                missing_percentage = (total_missing / (len(self.data) * len(required_columns))) * 100
-                
-                info_text = f"Dataset: {len(self.data)} registros, {len(self.data.columns)} columnas\nValores faltantes: {total_missing} ({missing_percentage:.1f}%)"
-                self.data_info_label.config(text=info_text, fg=self.colors['green'])
-                self.preprocess_button.config(state='normal', bg=self.colors['teal'])
-                self.preprocessing_done = False
-                self.train_button.config(state='disabled', bg=self.colors['surface1'])
-                
-                # Mensaje detallado sobre valores faltantes
-                missing_msg = "Dataset cargado correctamente\n\n"
-                if total_missing > 0:
-                    missing_msg += "VALORES FALTANTES DETECTADOS:\n"
-                    for col, count in self.missing_info.items():
-                        if count > 0:
-                            percentage = (count / len(self.data)) * 100
-                            missing_msg += f"• {col}: {count} valores ({percentage:.1f}%)\n"
-                    missing_msg += f"\nTotal: {total_missing} valores faltantes"
-                else:
-                    missing_msg += "No se detectaron valores faltantes en el dataset."
-                
-                messagebox.showinfo("Análisis del Dataset", missing_msg)
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Error al cargar el archivo: {str(e)}")
-    
-    def analyze_missing_values(self):
-        """Análisis detallado de valores faltantes por columna"""
-        missing_info = {}
-        feature_columns = ['Gender', 'AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 
-                          'TG', 'HDL', 'LDL', 'VLDL', 'BMI', 'CLASS']
-        
-        for col in feature_columns:
-            if col in self.data.columns:
-                missing_info[col] = self.data[col].isnull().sum()
-        
-        return missing_info
-    
-    def validate_dataset(self, df):
-        """Validación exhaustiva del dataset antes del preprocesamiento"""
-        validation_report = []
-        
-        # Verificar estructura básica
-        if df.empty:
-            validation_report.append("ERROR: Dataset vacío")
-            return validation_report
-        
-        required_columns = ['Gender', 'AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 
-                           'TG', 'HDL', 'LDL', 'VLDL', 'BMI', 'CLASS']
-        
-        missing_cols = [col for col in required_columns if col not in df.columns]
-        if missing_cols:
-            validation_report.append(f"ERROR: Columnas faltantes: {missing_cols}")
-        
-        # Verificar tipos de datos y valores problemáticos
-        for col in required_columns:
-            if col not in df.columns:
-                continue
-                
-            total_values = len(df)
-            non_null_values = df[col].notna().sum()
-            null_percentage = (total_values - non_null_values) / total_values * 100
+        for i, (name, config) in enumerate(self.models.items()):
+            st.write(f"**Entrenando {name}...**")
             
-            validation_report.append(f"{col}: {non_null_values}/{total_values} valores válidos ({null_percentage:.1f}% NaN)")
+            # Seleccionar datos (escalados o no)
+            X_train_data = self.X_train_scaled if config['use_scaled'] else self.X_train
+            X_test_data = self.X_test_scaled if config['use_scaled'] else self.X_test
             
-            # Verificaciones específicas por columna
-            if col == 'Gender':
-                # Limpiar espacios para análisis
-                gender_clean = df[col].astype(str).str.strip()
-                unique_genders = gender_clean.dropna().unique()
-                validation_report.append(f"  Géneros únicos: {list(unique_genders)}")
-                
-                # Detectar espacios problemáticos
-                has_spaces = df[col].astype(str).str.contains(' ', na=False).any()
-                if has_spaces:
-                    validation_report.append(f"  ADVERTENCIA: Espacios detectados en Gender")
-                
-            elif col == 'CLASS':
-                # Limpiar espacios para análisis
-                class_clean = df[col].astype(str).str.strip().str.upper()
-                unique_classes = class_clean.dropna().unique()
-                validation_report.append(f"  Clases únicas: {list(unique_classes)}")
-                
-                # Detectar espacios problemáticos
-                has_spaces = df[col].astype(str).str.contains(' ', na=False).any()
-                if has_spaces:
-                    validation_report.append(f"  ADVERTENCIA: Espacios detectados en CLASS")
-                
-                # Mostrar problemas específicos
-                original_classes = df[col].dropna().unique()
-                for orig_class in original_classes:
-                    clean_class = str(orig_class).strip().upper()
-                    if str(orig_class) != clean_class:
-                        validation_report.append(f"  PROBLEMA: '{orig_class}' se limpiará a '{clean_class}'")
-                
-                class_counts = df[col].value_counts()
-                validation_report.append(f"  Distribución: {dict(class_counts)}")
-                
-            elif col in ['AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 'TG', 'HDL', 'LDL', 'VLDL', 'BMI']:
-                # Verificar valores numéricos
-                numeric_vals = pd.to_numeric(df[col], errors='coerce')
-                non_numeric = df[col].notna() & numeric_vals.isna()
-                if non_numeric.any():
-                    validation_report.append(f"  ADVERTENCIA: {non_numeric.sum()} valores no numéricos en {col}")
-                    # Mostrar ejemplos de valores problemáticos
-                    problem_values = df[col][non_numeric].unique()[:3]  # Primeros 3 ejemplos
-                    validation_report.append(f"  Ejemplos problemáticos: {list(problem_values)}")
-                
-                if numeric_vals.notna().any():
-                    min_val = numeric_vals.min()
-                    max_val = numeric_vals.max()
-                    validation_report.append(f"  Rango: {min_val:.2f} - {max_val:.2f}")
-                    
-                    # Detectar valores atípicos extremos
-                    if col == 'AGE' and (min_val < 0 or max_val > 150):
-                        validation_report.append(f"  ADVERTENCIA: Edades atípicas detectadas")
-                    elif col == 'BMI' and (min_val < 10 or max_val > 70):
-                        validation_report.append(f"  ADVERTENCIA: BMI atípico detectado")
-        
-        return validation_report
-    
-    def start_preprocessing(self):
-        """Inicio del proceso de preprocesamiento con validación previa"""
-        if self.data is None:
-            messagebox.showerror("Error", "Debe cargar un dataset primero")
-            return
-        
-        # Validación del dataset antes del preprocesamiento
-        validation_report = self.validate_dataset(self.data)
-        
-        # Mostrar reporte de validación
-        validation_text = "VALIDACIÓN DEL DATASET:\n\n" + "\n".join(validation_report)
-        
-        # Verificar si hay errores críticos
-        has_errors = any("ERROR:" in line for line in validation_report)
-        if has_errors:
-            messagebox.showerror("Errores en Dataset", validation_text)
-            return
-        
-        # Mostrar advertencias si las hay
-        has_warnings = any("ADVERTENCIA:" in line for line in validation_report)
-        if has_warnings:
-            response = messagebox.askyesno(
-                "Advertencias Detectadas", 
-                validation_text + "\n\n¿Desea continuar con el preprocesamiento?"
-            )
-            if not response:
-                return
-        
-        # Ejecutar preprocesamiento en hilo separado
-        preprocessing_thread = threading.Thread(target=self.run_preprocessing)
-        preprocessing_thread.daemon = True
-        preprocessing_thread.start()
-    
-    def handle_missing_values(self, df):
-        """Manejo robusto de valores faltantes según la estrategia seleccionada"""
-        strategy = self.imputation_var.get()
-        
-        # Verificar columnas requeridas
-        required_columns = ['Gender', 'AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 'TG', 'HDL', 'LDL', 'VLDL', 'BMI', 'CLASS']
-        missing_cols = [col for col in required_columns if col not in df.columns]
-        if missing_cols:
-            raise Exception(f"Columnas faltantes en el dataset: {missing_cols}")
-        
-        # Trabajar solo con columnas requeridas
-        df_work = df[required_columns].copy()
-        
-        # Verificar que CLASS no tenga valores faltantes
-        if df_work['CLASS'].isnull().any():
-            nan_count = df_work['CLASS'].isnull().sum()
-            raise Exception(f"La variable objetivo CLASS contiene {nan_count} valores faltantes. "
-                          "No se puede proceder sin etiquetas válidas.")
-        
-        if strategy == "drop":
-            # Eliminar filas con valores faltantes (excepto CLASS que ya verificamos)
-            df_clean = df_work.dropna()
-            if len(df_clean) < len(df_work) * 0.5:  # Si se pierden más del 50% de datos
-                response = messagebox.askyesno(
-                    "Advertencia", 
-                    f"Eliminar filas con NaN resultará en pérdida de {len(df_work) - len(df_clean)} registros "
-                    f"({((len(df_work) - len(df_clean)) / len(df_work)) * 100:.1f}% del dataset).\n"
-                    "¿Desea continuar?"
-                )
-                if not response:
-                    raise Exception("Operación cancelada por el usuario")
-            return df_clean
-        
-        else:
-            # Imputación de valores faltantes
-            df_clean = df_work.copy()
-            
-            # Separar columnas por tipo
-            numeric_columns = ['AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 'TG', 'HDL', 'LDL', 'VLDL', 'BMI']
-            categorical_columns = ['Gender']
-            
-            # Verificar que las columnas numéricas sean realmente numéricas
-            for col in numeric_columns:
-                if col in df_clean.columns:
-                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-            
-            if strategy == "knn":
-                # Validar que tengamos suficientes datos para KNN
-                total_features = len(numeric_columns) + len(categorical_columns)
-                if df_clean.dropna().shape[0] < 5:  # Necesitamos al menos 5 registros completos para KNN
-                    raise Exception("Datos insuficientes para imputación KNN. Use otra estrategia o elimine filas.")
-                
-                # Imputación KNN
-                self.imputer = KNNImputer(n_neighbors=min(5, len(df_clean.dropna())))
-                
-                # Manejar Gender para KNN
-                le_temp = LabelEncoder()
-                gender_backup = df_clean['Gender'].copy()
-                
-                # Imputar Gender con moda si hay NaN
-                if df_clean['Gender'].isnull().any():
-                    gender_mode = df_clean['Gender'].mode()
-                    mode_value = gender_mode[0] if len(gender_mode) > 0 else 'M'  # Default a 'M'
-                    df_clean['Gender'].fillna(mode_value, inplace=True)
-                
-                # Codificar Gender
-                df_clean['Gender_encoded'] = le_temp.fit_transform(df_clean['Gender'])
-                
-                # Aplicar KNN a todas las características
-                feature_cols = numeric_columns + ['Gender_encoded']
-                available_cols = [col for col in feature_cols if col in df_clean.columns]
-                
-                try:
-                    imputed_data = self.imputer.fit_transform(df_clean[available_cols])
-                    df_clean[available_cols] = imputed_data
-                    
-                    # Revertir codificación de Gender
-                    df_clean['Gender'] = le_temp.inverse_transform(df_clean['Gender_encoded'].round().astype(int))
-                    df_clean.drop('Gender_encoded', axis=1, inplace=True)
-                    
-                except Exception as e:
-                    raise Exception(f"Error en imputación KNN: {str(e)}. Intente con otra estrategia.")
-                
-            else:
-                # Imputación simple (media/mediana para numéricas, moda para categóricas)
-                strategy_num = 'mean' if strategy == 'mean' else 'median'
-                
-                # Imputar variables numéricas
-                numeric_cols_present = [col for col in numeric_columns if col in df_clean.columns]
-                if numeric_cols_present and df_clean[numeric_cols_present].isnull().any().any():
-                    try:
-                        imputer_num = SimpleImputer(strategy=strategy_num)
-                        df_clean[numeric_cols_present] = imputer_num.fit_transform(df_clean[numeric_cols_present])
-                    except Exception as e:
-                        # Si falla la imputación numérica, usar mediana como respaldo
-                        imputer_backup = SimpleImputer(strategy='median')
-                        df_clean[numeric_cols_present] = imputer_backup.fit_transform(df_clean[numeric_cols_present])
-                
-                # Imputar variables categóricas con moda
-                for col in categorical_columns:
-                    if col in df_clean.columns and df_clean[col].isnull().any():
-                        mode_values = df_clean[col].mode()
-                        mode_value = mode_values[0] if len(mode_values) > 0 else 'M'  # Default
-                        df_clean[col].fillna(mode_value, inplace=True)
-            
-            # Verificación final: asegurar que no queden NaN
-            remaining_nan = df_clean.isnull().sum().sum()
-            if remaining_nan > 0:
-                nan_cols = df_clean.columns[df_clean.isnull().any()].tolist()
-                raise Exception(f"Aún quedan {remaining_nan} valores NaN en columnas: {nan_cols}. "
-                              "Intente con estrategia 'Eliminar filas'.")
-            
-            return df_clean
-    
-    def preprocess_data(self):
-        """Preprocesamiento robusto de datos con validaciones exhaustivas"""
-        try:
-            # Manejo de valores faltantes
-            self.progress_var.set("🔄 Manejando valores faltantes...")
-            self.update_progress_bar(20)
-            self.root.update()
-            
-            self.data_clean = self.handle_missing_values(self.data)
-            
-            # Verificar que aún tengamos suficientes datos
-            if len(self.data_clean) < 50:
-                raise Exception(f"Dataset insuficiente después del manejo de valores faltantes: {len(self.data_clean)} registros")
-            
-            self.progress_var.set("🧹 Limpiando y codificando variables...")
-            self.update_progress_bar(40)
-            self.root.update()
-            
-            # Copia de datos para procesamiento
-            df = self.data_clean.copy()
-            
-            # Limpieza de espacios en blanco en columnas de texto
-            text_columns = ['Gender', 'CLASS']
-            for col in text_columns:
-                if col in df.columns:
-                    # Convertir a string y limpiar espacios
-                    df[col] = df[col].astype(str).str.strip()
-                    # Reemplazar 'nan' string con NaN real
-                    df[col] = df[col].replace('nan', np.nan)
-            
-            # Verificar tipos de datos
-            expected_types = {
-                'AGE': 'numeric', 'Urea': 'numeric', 'Cr': 'numeric', 'HbA1c': 'numeric',
-                'Chol': 'numeric', 'TG': 'numeric', 'HDL': 'numeric', 'LDL': 'numeric',
-                'VLDL': 'numeric', 'BMI': 'numeric'
-            }
-            
-            for col, expected_type in expected_types.items():
-                if col in df.columns:
-                    if expected_type == 'numeric':
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                        # Verificar si la conversión introdujo NaN
-                        if df[col].isnull().any():
-                            raise Exception(f"Error en conversión numérica de columna {col}. Verifique los datos.")
-            
-            # Codificación de variable categórica Gender
-            if 'Gender' not in df.columns:
-                raise Exception("Columna 'Gender' no encontrada")
-            
-            # Limpieza adicional para Gender
-            valid_genders = df['Gender'].dropna().unique()
-            if len(valid_genders) == 0:
-                raise Exception("No hay valores válidos en la columna Gender")
-            
-            # Normalizar valores de Gender comunes
-            gender_mapping = {
-                'M': 'M', 'm': 'M', 'Male': 'M', 'MALE': 'M', 'male': 'M',
-                'F': 'F', 'f': 'F', 'Female': 'F', 'FEMALE': 'F', 'female': 'F'
-            }
-            
-            df['Gender'] = df['Gender'].map(gender_mapping).fillna(df['Gender'])
-            
-            # Verificar que solo tengamos M/F
-            final_genders = df['Gender'].dropna().unique()
-            invalid_genders = set(final_genders) - {'M', 'F'}
-            if invalid_genders:
-                raise Exception(f"Valores inválidos en Gender: {invalid_genders}. Solo se permiten M/F")
-            
-            le_gender = LabelEncoder()
-            try:
-                df['Gender'] = le_gender.fit_transform(df['Gender'])
-            except Exception as e:
-                raise Exception(f"Error en codificación de Gender: {str(e)}")
-            
-            self.progress_var.set("🎯 Preparando variables objetivo...")
-            self.update_progress_bar(60)
-            self.root.update()
-            
-            # Verificar variable objetivo CLASS
-            if 'CLASS' not in df.columns:
-                raise Exception("Columna 'CLASS' no encontrada")
-            
-            # Limpieza y normalización de CLASS
-            df['CLASS'] = df['CLASS'].str.upper()  # Convertir a mayúsculas
-            
-            valid_classes = df['CLASS'].dropna().unique()
-            if len(valid_classes) == 0:
-                raise Exception("No hay valores válidos en la columna CLASS")
-            
-            # Preparación de variables objetivo según configuración
-            if self.binary_var.get():
-                # Clasificación binaria: N=0 (No diabetes), P,Y=1 (Diabetes)
-                class_mapping = {'N': 0, 'P': 1, 'Y': 1}
-                unknown_classes = set(valid_classes) - set(class_mapping.keys())
-                if unknown_classes:
-                    # Mostrar clases problemáticas con sus representaciones
-                    problem_classes = []
-                    for cls in unknown_classes:
-                        problem_classes.append(f"'{cls}' (longitud: {len(cls)}, ASCII: {[ord(c) for c in cls]})")
-                    
-                    raise Exception(f"Clases desconocidas en CLASS: {unknown_classes}. "
-                                  f"Esperadas: {list(class_mapping.keys())}. "
-                                  f"Detalles: {problem_classes}")
-                
-                df['CLASS'] = df['CLASS'].map(class_mapping)
-                self.class_names = ['No Diabetes', 'Diabetes']
-            else:
-                # Clasificación multiclase
-                # Verificar que tengamos clases válidas
-                expected_multiclass = {'N', 'P', 'Y'}
-                unknown_classes = set(valid_classes) - expected_multiclass
-                if unknown_classes:
-                    raise Exception(f"Clases desconocidas en CLASS: {unknown_classes}. "
-                                  f"Esperadas: {list(expected_multiclass)}")
-                
-                le_class = LabelEncoder()
-                df['CLASS'] = le_class.fit_transform(df['CLASS'])
-                self.class_names = le_class.classes_
-            
-            # Verificar que no hay NaN después de la codificación
-            if df['CLASS'].isnull().any():
-                raise Exception("Valores faltantes en CLASS después de la codificación")
-            
-            self.progress_var.set("📊 Dividiendo conjunto de datos...")
-            self.update_progress_bar(80)
-            self.root.update()
-            
-            # Separación de características y variable objetivo
-            feature_columns = ['Gender', 'AGE', 'Urea', 'Cr', 'HbA1c', 'Chol', 
-                              'TG', 'HDL', 'LDL', 'VLDL', 'BMI']
-            
-            # Verificar que todas las columnas de características existan
-            missing_features = [col for col in feature_columns if col not in df.columns]
-            if missing_features:
-                raise Exception(f"Características faltantes: {missing_features}")
-            
-            X = df[feature_columns]
-            y = df['CLASS']
-            
-            # Verificar que no hay NaN en las características finales
-            if X.isnull().any().any():
-                nan_features = X.columns[X.isnull().any()].tolist()
-                raise Exception(f"Valores NaN en características finales: {nan_features}")
-            
-            # Verificar distribución de clases para estratificación
-            unique_classes, class_counts = np.unique(y, return_counts=True)
-            min_class_count = min(class_counts)
-            if min_class_count < 2:
-                raise Exception(f"Clase con muy pocas muestras para división estratificada: {min_class_count}")
-            
-            # División 80/20 para entrenamiento y prueba
-            try:
-                self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42, stratify=y
-                )
-            except Exception as e:
-                raise Exception(f"Error en división de datos: {str(e)}")
-            
-            # Normalización de características numéricas
-            try:
-                self.X_train_scaled = self.scaler.fit_transform(self.X_train)
-                self.X_test_scaled = self.scaler.transform(self.X_test)
-            except Exception as e:
-                raise Exception(f"Error en normalización: {str(e)}")
-            
-            # Verificaciones finales
-            if np.isnan(self.X_train_scaled).any():
-                raise Exception("NaN detectados en datos de entrenamiento normalizados")
-            if np.isnan(self.X_test_scaled).any():
-                raise Exception("NaN detectados en datos de prueba normalizados")
-            
-        except Exception as e:
-            # Re-lanzar con contexto adicional
-            raise Exception(f"Error en preprocesamiento: {str(e)}")
-    
-    def run_preprocessing(self):
-        """Proceso de preprocesamiento de datos con manejo robusto de errores"""
-        try:
-            self.progress_var.set("Iniciando preprocesamiento...")
-            self.update_progress_bar(10)
-            self.root.update()
-            
-            # Ejecutar preprocesamiento
-            self.preprocess_data()
-            
-            # Actualizar información de preprocesamiento
-            self.update_progress_bar(100)
-            self.progress_var.set("✅ Preprocesamiento completado")
-            
-            # Mostrar resultados del preprocesamiento
-            original_size = len(self.data)
-            final_size = len(self.data_clean)
-            loss_percentage = ((original_size - final_size) / original_size) * 100 if original_size != final_size else 0
-            
-            preprocess_info = f"✅ Procesado: {final_size} registros"
-            if original_size != final_size:
-                preprocess_info += f" (perdidos: {original_size - final_size})"
-            
-            self.preprocess_info_label.config(text=preprocess_info, fg=self.colors['green'])
-            
-            # Habilitar botón de entrenamiento
-            self.preprocessing_done = True
-            self.train_button.config(state='normal', bg=self.colors['green'])
-            self.preprocess_button.config(state='disabled', bg=self.colors['surface1'])
-            
-            # Mostrar resumen detallado
-            summary_msg = f"PREPROCESAMIENTO COMPLETADO EXITOSAMENTE\n\n"
-            summary_msg += f"Estrategia utilizada: {self._get_strategy_name()}\n"
-            summary_msg += f"Registros originales: {original_size}\n"
-            summary_msg += f"Registros finales: {final_size}\n"
-            
-            if original_size != final_size:
-                summary_msg += f"Registros eliminados: {original_size - final_size} ({loss_percentage:.1f}%)\n"
-            
-            summary_msg += f"\nConjuntos creados:\n"
-            summary_msg += f"• Entrenamiento: {len(self.y_train)} muestras\n"
-            summary_msg += f"• Prueba: {len(self.y_test)} muestras\n"
-            summary_msg += f"\nDistribución de clases en entrenamiento:\n"
-            
-            # Mostrar distribución de clases
-            unique, counts = np.unique(self.y_train, return_counts=True)
-            for i, (class_val, count) in enumerate(zip(unique, counts)):
-                class_name = self.class_names[class_val] if hasattr(self, 'class_names') else f"Clase {class_val}"
-                percentage = (count / len(self.y_train)) * 100
-                summary_msg += f"• {class_name}: {count} ({percentage:.1f}%)\n"
-            
-            summary_msg += f"\nCalidad de datos verificada:\n"
-            summary_msg += f"• Sin valores NaN restantes\n"
-            summary_msg += f"• Variables codificadas correctamente\n"
-            summary_msg += f"• Datos normalizados listos\n"
-            summary_msg += f"\nEl sistema está listo para el entrenamiento."
-            
-            messagebox.showinfo("Preprocesamiento Completado", summary_msg)
-            
-        except Exception as e:
-            error_msg = str(e)
-            
-            # Proporcionar sugerencias específicas basadas en el error
-            suggestions = "\n\nSUGERENCIAS:\n"
-            if "NaN" in error_msg or "contains NaN" in error_msg:
-                suggestions += "• Intente con estrategia 'Eliminar filas'\n"
-                suggestions += "• Verifique que todas las columnas numéricas contengan valores válidos\n"
-                suggestions += "• Revise si hay celdas vacías o texto en columnas numéricas"
-            elif "desconocidas en CLASS" in error_msg or "Clases desconocidas" in error_msg:
-                suggestions += "• PROBLEMA DETECTADO: Espacios extra en valores CLASS\n"
-                suggestions += "• El sistema ahora limpia automáticamente los espacios\n"
-                suggestions += "• Verifique que CLASS contenga solo: N, P, Y (sin espacios)\n"
-                suggestions += "• Revise el archivo CSV original para caracteres invisibles"
-            elif "Gender" in error_msg:
-                suggestions += "• Verifique que la columna Gender contenga valores válidos (M/F)\n"
-                suggestions += "• Asegúrese de que no haya espacios extra o caracteres especiales\n"
-                suggestions += "• El sistema acepta: M, F, Male, Female (en cualquier caso)"
-            elif "CLASS" in error_msg:
-                suggestions += "• Verifique que la columna CLASS contenga valores válidos (N/P/Y)\n"
-                suggestions += "• Asegúrese de que cada registro tenga una etiqueta de clase\n"
-                suggestions += "• Revise si hay espacios extra antes o después de los valores"
-            elif "insuficiente" in error_msg:
-                suggestions += "• Use una estrategia de imputación en lugar de eliminar filas\n"
-                suggestions += "• Verifique que el dataset tenga suficientes registros válidos"
-            else:
-                suggestions += "• Verifique la calidad de los datos de entrada\n"
-                suggestions += "• Intente con una estrategia diferente de manejo de valores faltantes\n"
-                suggestions += "• Revise que no haya espacios extra en columnas de texto"
-            
-            full_error_msg = f"Error durante el preprocesamiento:\n\n{error_msg}{suggestions}"
-            messagebox.showerror("Error en Preprocesamiento", full_error_msg)
-            
-            self.progress_var.set("❌ Error en preprocesamiento")
-            self.preprocess_button.config(state='normal', bg=self.colors['teal'])
-            self.preprocessing_done = False
-    
-    def start_training(self):
-        """Inicio del proceso de entrenamiento en hilo separado"""
-        if self.data is None:
-            messagebox.showerror("Error", "Debe cargar un dataset primero")
-            return
-        
-        if not self.preprocessing_done:
-            messagebox.showerror("Error", "Debe preprocesar los datos antes del entrenamiento")
-            return
-        
-        # Ejecutar entrenamiento en hilo separado para mantener UI responsiva
-        training_thread = threading.Thread(target=self.run_training)
-        training_thread.daemon = True
-        training_thread.start()
-    
-    def train_model(self, model_name, model_config):
-        """Entrenamiento de modelo individual con Grid Search y validación cruzada"""
-        self.progress_var.set(f"🤖 Entrenando {model_name}...")
-        self.root.update()
-        
-        # Grid Search con validación cruzada k=5
-        grid_search = GridSearchCV(
-            model_config['model'],
-            model_config['params'],
-            cv=5,
-            scoring='accuracy',
-            n_jobs=-1,
-            verbose=0
-        )
-        
-        # Entrenamiento con datos normalizados para Logistic Regression
-        if model_name == 'Logistic Regression':
-            grid_search.fit(self.X_train_scaled, self.y_train)
-            y_pred = grid_search.predict(self.X_test_scaled)
-        else:
-            grid_search.fit(self.X_train, self.y_train)
-            y_pred = grid_search.predict(self.X_test)
-        
-        # Cálculo de métricas de evaluación
-        accuracy = accuracy_score(self.y_test, y_pred)
-        precision = precision_score(self.y_test, y_pred, average='weighted', zero_division=0)
-        recall = recall_score(self.y_test, y_pred, average='weighted', zero_division=0)
-        f1 = f1_score(self.y_test, y_pred, average='weighted', zero_division=0)
-        
-        # Validación cruzada para robustez del modelo
-        if model_name == 'Logistic Regression':
-            cv_scores = cross_val_score(grid_search.best_estimator_, 
-                                      self.X_train_scaled, self.y_train, cv=5)
-        else:
-            cv_scores = cross_val_score(grid_search.best_estimator_, 
-                                      self.X_train, self.y_train, cv=5)
-        
-        return {
-            'model': grid_search.best_estimator_,
-            'best_params': grid_search.best_params_,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'cv_mean': cv_scores.mean(),
-            'cv_std': cv_scores.std(),
-            'predictions': y_pred
-        }
-    
-    def run_training(self):
-        """Proceso principal de entrenamiento y evaluación"""
-        try:
-            # Verificar que el preprocesamiento esté completo
-            if not self.preprocessing_done:
-                messagebox.showerror("Error", "Los datos no han sido preprocesados")
-                return
-            
-            self.progress_var.set("🚀 Iniciando entrenamiento de modelos...")
-            self.update_progress_bar(0)
-            self.root.update()
-            
-            # Entrenamiento de modelos
-            total_models = len(self.models_config)
-            for i, (model_name, model_config) in enumerate(self.models_config.items()):
-                
-                # Actualización de progreso
-                progress = (i * 80 / total_models)
-                self.update_progress_bar(progress)
-                
-                # Entrenamiento del modelo
-                results = self.train_model(model_name, model_config)
-                self.models_results[model_name] = results
-                
-                self.root.update()
-            
-            # Visualización de resultados
-            self.progress_var.set("📊 Generando resultados...")
-            self.update_progress_bar(90)
-            self.root.update()
-            
-            self.display_results()
-            
-            self.progress_var.set("✅ Entrenamiento completado exitosamente")
-            self.update_progress_bar(100)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error durante el entrenamiento: {str(e)}")
-            self.progress_var.set("❌ Error en entrenamiento")
-    
-    def display_results(self):
-        """Visualización de resultados de evaluación en interface"""
-        # Limpiar pestañas anteriores
-        for tab in self.results_notebook.tabs():
-            self.results_notebook.forget(tab)
-        
-        # Crear pestaña para cada modelo
-        for model_name, results in self.models_results.items():
-            
-            # Frame para resultados del modelo
-            tab_frame = tk.Frame(self.results_notebook, bg=self.colors['base'])
-            self.results_notebook.add(tab_frame, text=model_name)
-            
-            # Scroll para el contenido
-            canvas = tk.Canvas(tab_frame, bg=self.colors['base'], highlightthickness=0)
-            scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
-            scrollable_content = tk.Frame(canvas, bg=self.colors['base'])
-            
-            scrollable_content.bind(
-                "<Configure>",
-                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            # Grid Search con validación cruzada K=5
+            grid_search = GridSearchCV(
+                config['model'],
+                config['param_grid'],
+                cv=5,
+                scoring='accuracy',
+                n_jobs=-1
             )
             
-            canvas.create_window((0, 0), window=scrollable_content, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
+            grid_search.fit(X_train_data, self.y_train)
             
-            # Contenido del modelo
-            model_card = self.create_card_frame(scrollable_content)
-            model_card.pack(fill='both', expand=True, padx=10, pady=10)
+            # Mejor modelo
+            best_model = grid_search.best_estimator_
+            self.best_models[name] = best_model
             
-            # Header del modelo
-            header = tk.Frame(model_card, bg=self.colors['surface0'])
-            header.pack(fill='x', padx=20, pady=15)
+            # Predicciones
+            y_pred_train = best_model.predict(X_train_data)
+            y_pred_test = best_model.predict(X_test_data)
             
-            model_icons = {
-                'Decision Tree': '🌳',
-                'Logistic Regression': '📈', 
-                'Random Forest': '🌲'
+            # Métricas
+            train_accuracy = accuracy_score(self.y_train, y_pred_train)
+            test_accuracy = accuracy_score(self.y_test, y_pred_test)
+            
+            # Validación cruzada
+            cv_scores = cross_val_score(best_model, X_train_data, self.y_train, cv=5)
+            
+            results[name] = {
+                'best_params': grid_search.best_params_,
+                'cv_score_mean': cv_scores.mean(),
+                'cv_score_std': cv_scores.std(),
+                'train_accuracy': train_accuracy,
+                'test_accuracy': test_accuracy,
+                'y_pred_test': y_pred_test
             }
             
-            icon = model_icons.get(model_name, '🤖')
-            tk.Label(header, text=f"{icon} {model_name}", 
-                    bg=self.colors['surface0'], fg=self.colors['blue'],
-                    font=('SF Pro Display', 16, 'bold')).pack(anchor='w')
+            # Mostrar resultados del modelo
+            with st.expander(f"📋 Resultados de {name}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Mejores Hiperparámetros:**")
+                    for param, value in grid_search.best_params_.items():
+                        st.write(f"- {param}: {value}")
+                with col2:
+                    st.metric("Precisión CV", f"{cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+                    st.metric("Precisión Prueba", f"{test_accuracy:.3f}")
             
-            # Métricas principales
-            metrics_frame = tk.Frame(model_card, bg=self.colors['surface0'])
-            metrics_frame.pack(fill='x', padx=20, pady=10)
-            
-            metrics = [
-                ('Accuracy', results['accuracy'], self.colors['green']),
-                ('Precision', results['precision'], self.colors['blue']),
-                ('Recall', results['recall'], self.colors['yellow']),
-                ('F1-Score', results['f1_score'], self.colors['mauve'])
-            ]
-            
-            metrics_grid = tk.Frame(metrics_frame, bg=self.colors['surface0'])
-            metrics_grid.pack(fill='x')
-            
-            for i, (metric, value, color) in enumerate(metrics):
-                metric_card = tk.Frame(metrics_grid, bg=self.colors['surface1'], relief='flat', bd=1)
-                metric_card.grid(row=0, column=i, padx=5, pady=5, sticky='ew')
-                
-                tk.Label(metric_card, text=metric, 
-                        bg=self.colors['surface1'], fg=self.colors['subtext1'],
-                        font=('SF Pro Display', 10)).pack(pady=(10, 5))
-                
-                tk.Label(metric_card, text=f"{value:.4f}", 
-                        bg=self.colors['surface1'], fg=color,
-                        font=('SF Pro Display', 14, 'bold')).pack(pady=(0, 10))
-                
-                metrics_grid.columnconfigure(i, weight=1)
-            
-            # Información detallada
-            details_text = f"""
-HIPERPARÁMETROS OPTIMIZADOS:
-{self._format_params_modern(results['best_params'])}
-
-VALIDACIÓN CRUZADA (k=5):
-• Media: {results['cv_mean']:.4f}
-• Desviación Estándar: {results['cv_std']:.4f}
-
-CONFIGURACIÓN DEL EXPERIMENTO:
-• Conjunto de entrenamiento: {len(self.y_train)} muestras
-• Conjunto de prueba: {len(self.y_test)} muestras
-• Estrategia de validación: Validación cruzada estratificada
-• Optimización: Grid Search exhaustivo
-            """
-            
-            # Widget de texto personalizado
-            text_frame = tk.Frame(model_card, bg=self.colors['surface0'])
-            text_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
-            
-            text_widget = tk.Text(text_frame, wrap=tk.WORD, 
-                                 bg=self.colors['surface1'], fg=self.colors['text'],
-                                 font=('SF Pro Text', 10), relief='flat', bd=0,
-                                 padx=15, pady=15, insertbackground=self.colors['text'])
-            text_widget.pack(fill='both', expand=True)
-            text_widget.insert(tk.END, details_text)
-            text_widget.config(state=tk.DISABLED)
-            
-            canvas.pack(side="left", fill="both", expand=True)
-            scrollbar.pack(side="right", fill="y")
-            
-            # Configurar scroll
-            def on_mousewheel(event):
-                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            canvas.bind("<MouseWheel>", on_mousewheel)
+            progress_bar.progress((i + 1) / len(self.models))
         
-        # Pestaña de comparación general
-        comparison_frame = tk.Frame(self.results_notebook, bg=self.colors['base'])
-        self.results_notebook.add(comparison_frame, text="📊 Comparación")
-        
-        comparison_card = self.create_card_frame(comparison_frame)
-        comparison_card.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Header de comparación
-        comp_header = tk.Frame(comparison_card, bg=self.colors['surface0'])
-        comp_header.pack(fill='x', padx=20, pady=15)
-        
-        tk.Label(comp_header, text="📊 Comparación de Modelos", 
-                bg=self.colors['surface0'], fg=self.colors['blue'],
-                font=('SF Pro Display', 16, 'bold')).pack(anchor='w')
-        
-        # Contenido de comparación
-        comparison_text = self._generate_comparison_modern()
-        
-        comp_text_frame = tk.Frame(comparison_card, bg=self.colors['surface0'])
-        comp_text_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
-        
-        comp_widget = tk.Text(comp_text_frame, wrap=tk.WORD,
-                             bg=self.colors['surface1'], fg=self.colors['text'],
-                             font=('SF Pro Text', 10), relief='flat', bd=0,
-                             padx=15, pady=15, insertbackground=self.colors['text'])
-        comp_widget.pack(fill='both', expand=True)
-        comp_widget.insert(tk.END, comparison_text)
-        comp_widget.config(state=tk.DISABLED)
+        return results
     
-    def _format_params_modern(self, params_dict):
-        """Formateo moderno de hiperparámetros"""
-        formatted = []
-        for k, v in params_dict.items():
-            formatted.append(f"  • {k}: {v}")
-        return '\n'.join(formatted)
+    def generate_detailed_metrics(self, results):
+        """
+        Genera métricas detalladas para todos los modelos.
+        """
+        st.subheader("📈 Métricas Detalladas de los Modelos")
+        
+        # Tabla comparativa
+        comparison_data = []
+        for name, result in results.items():
+            comparison_data.append({
+                'Modelo': name,
+                'Precisión CV': f"{result['cv_score_mean']:.3f} ± {result['cv_score_std']:.3f}",
+                'Precisión Entrenamiento': f"{result['train_accuracy']:.3f}",
+                'Precisión Prueba': f"{result['test_accuracy']:.3f}",
+                'Overfitting': f"{result['train_accuracy'] - result['test_accuracy']:.3f}"
+            })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True)
+        
+        # Métricas detalladas por modelo
+        for name, result in results.items():
+            with st.expander(f"📊 Métricas Detalladas - {name}"):
+                y_pred = result['y_pred_test']
+                
+                # Métricas por clase
+                precision = precision_score(self.y_test, y_pred, average=None)
+                recall = recall_score(self.y_test, y_pred, average=None)
+                f1 = f1_score(self.y_test, y_pred, average=None)
+                
+                # Crear DataFrame de métricas
+                metrics_df = pd.DataFrame({
+                    'Medicamento': self.target_names,
+                    'Precisión': precision,
+                    'Recall': recall,
+                    'F1-Score': f1
+                })
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(metrics_df, use_container_width=True)
+                
+                with col2:
+                    # Matriz de confusión
+                    cm = confusion_matrix(self.y_test, y_pred)
+                    fig_cm = px.imshow(cm, 
+                                      text_auto=True,
+                                      aspect="auto",
+                                      title=f"Matriz de Confusión - {name}",
+                                      labels=dict(x="Predicho", y="Real"),
+                                      x=self.target_names,
+                                      y=self.target_names)
+                    st.plotly_chart(fig_cm, use_container_width=True)
+        
+        # Gráfico comparativo de rendimiento
+        st.subheader("📊 Comparación de Rendimiento")
+        
+        models_names = list(results.keys())
+        cv_scores = [results[name]['cv_score_mean'] for name in models_names]
+        test_scores = [results[name]['test_accuracy'] for name in models_names]
+        
+        fig_comparison = go.Figure(data=[
+            go.Bar(name='Validación Cruzada', x=models_names, y=cv_scores),
+            go.Bar(name='Prueba', x=models_names, y=test_scores)
+        ])
+        fig_comparison.update_layout(
+            title="Comparación de Precisión de Modelos",
+            yaxis_title="Precisión",
+            barmode='group'
+        )
+        st.plotly_chart(fig_comparison, use_container_width=True)
     
-    def _generate_comparison_modern(self):
-        """Generación moderna de tabla comparativa de modelos"""
-        comparison = "RANKING DE MODELOS\n"
-        comparison += "=" * 50 + "\n\n"
+    def visualize_model_interpretability(self):
+        """
+        Visualiza la interpretabilidad de los modelos de caja blanca.
+        """
+        st.subheader("🔍 Interpretabilidad de los Modelos")
         
-        # Crear tabla de comparación
-        models_data = []
-        for model_name, results in self.models_results.items():
-            models_data.append((model_name, results['accuracy'], results))
+        # Decision Tree Visualization
+        if 'Decision Tree' in self.best_models:
+            st.write("**🌳 Árbol de Decisión**")
+            with st.expander("Ver Estructura del Árbol"):
+                fig, ax = plt.subplots(figsize=(20, 10))
+                plot_tree(self.best_models['Decision Tree'], 
+                         feature_names=self.feature_names,
+                         class_names=self.target_names,
+                         filled=True, 
+                         rounded=True,
+                         fontsize=10)
+                st.pyplot(fig)
+                
+                # Importancia de características
+                importances = self.best_models['Decision Tree'].feature_importances_
+                feat_imp_df = pd.DataFrame({
+                    'Característica': self.feature_names,
+                    'Importancia': importances
+                }).sort_values('Importancia', ascending=False)
+                
+                fig_imp = px.bar(feat_imp_df, 
+                               x='Importancia', 
+                               y='Característica',
+                               orientation='h',
+                               title="Importancia de Características - Decision Tree")
+                st.plotly_chart(fig_imp, use_container_width=True)
         
-        # Ordenar por accuracy
-        models_data.sort(key=lambda x: x[1], reverse=True)
-        
-        # Mostrar ranking
-        for i, (model_name, accuracy, results) in enumerate(models_data, 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            comparison += f"{medal} {model_name}\n"
-            comparison += f"   Accuracy: {results['accuracy']:.4f} | "
-            comparison += f"Precision: {results['precision']:.4f} | "
-            comparison += f"Recall: {results['recall']:.4f} | "
-            comparison += f"F1: {results['f1_score']:.4f}\n\n"
-        
-        # Información sobre el experimento
-        comparison += "CONFIGURACIÓN DEL EXPERIMENTO\n"
-        comparison += "=" * 50 + "\n"
-        
-        # Información sobre manejo de valores faltantes
-        total_missing = sum(self.missing_info.values())
-        original_size = len(self.data)
-        final_size = len(self.data_clean)
-        
-        comparison += f"📊 Datos procesados:\n"
-        comparison += f"   • Registros originales: {original_size}\n"
-        comparison += f"   • Registros finales: {final_size}\n"
-        comparison += f"   • Valores faltantes procesados: {total_missing}\n"
-        comparison += f"   • Estrategia de imputación: {self._get_strategy_name()}\n"
-        if original_size != final_size:
-            loss_percentage = ((original_size - final_size) / original_size) * 100
-            comparison += f"   • Pérdida de datos: {loss_percentage:.1f}%\n"
-        
-        comparison += f"\n🎯 Configuración del modelo:\n"
-        comparison += f"   • Tipo: {'Binaria' if self.binary_var.get() else 'Multiclase'}\n"
-        comparison += f"   • Clases: {', '.join(map(str, self.class_names))}\n"
-        comparison += f"   • División: 80% entrenamiento, 20% prueba\n"
-        comparison += f"   • Validación: Cruzada estratificada (k=5)\n"
-        comparison += f"   • Optimización: Grid Search exhaustivo\n"
-        
-        comparison += f"\n📈 Resultados del conjunto de prueba:\n"
-        comparison += f"   • Muestras evaluadas: {len(self.y_test)}\n"
-        
-        # Distribución de clases en el conjunto de prueba
-        unique, counts = np.unique(self.y_test, return_counts=True)
-        for class_val, count in zip(unique, counts):
-            class_name = self.class_names[class_val] if hasattr(self, 'class_names') else f"Clase {class_val}"
-            percentage = (count / len(self.y_test)) * 100
-            comparison += f"   • {class_name}: {count} ({percentage:.1f}%)\n"
-        
-        return comparison
+        # Logistic Regression Coefficients
+        if 'Logistic Regression' in self.best_models:
+            st.write("**📈 Regresión Logística - Coeficientes**")
+            with st.expander("Ver Coeficientes del Modelo"):
+                lr_model = self.best_models['Logistic Regression']
+                
+                # Para clasificación multiclase
+                if hasattr(lr_model, 'coef_'):
+                    coef_df_list = []
+                    for i, class_name in enumerate(self.target_names):
+                        for j, feature in enumerate(self.feature_names):
+                            coef_df_list.append({
+                                'Medicamento': class_name,
+                                'Característica': feature,
+                                'Coeficiente': lr_model.coef_[i][j]
+                            })
+                    
+                    coef_df = pd.DataFrame(coef_df_list)
+                    
+                    # Heatmap de coeficientes
+                    pivot_coef = coef_df.pivot(index='Característica', 
+                                             columns='Medicamento', 
+                                             values='Coeficiente')
+                    
+                    fig_coef = px.imshow(pivot_coef, 
+                                       text_auto=True,
+                                       aspect="auto",
+                                       title="Coeficientes de Regresión Logística")
+                    st.plotly_chart(fig_coef, use_container_width=True)
     
-    def _get_strategy_name(self):
-        """Obtener nombre descriptivo de la estrategia de imputación"""
-        strategy_names = {
-            'mean': 'Media/Moda',
-            'median': 'Mediana/Moda', 
-            'knn': 'KNN (k=5)',
-            'drop': 'Eliminación de filas'
-        }
-        return strategy_names.get(self.imputation_var.get(), 'Desconocida')
+    def create_prediction_interface(self):
+        """
+        Crea la interfaz para hacer predicciones con datos de nuevos pacientes.
+        """
+        st.subheader("🩺 Predicción para Nuevo Paciente")
+        
+        with st.form("patient_prediction"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                age = st.number_input("Edad", min_value=0, max_value=120, value=30)
+                sex = st.selectbox("Sexo", ["M", "F"])
+                bp = st.selectbox("Presión Arterial", ["HIGH", "NORMAL", "LOW"])
+            
+            with col2:
+                cholesterol = st.selectbox("Colesterol", ["HIGH", "NORMAL"])
+                na_k_ratio = st.number_input("Relación Na/K", min_value=0.0, max_value=50.0, value=15.0, step=0.1)
+            
+            submit_button = st.form_submit_button("🔮 Predecir Medicamento")
+            
+            if submit_button and hasattr(self, 'best_models'):
+                # Preparar datos del paciente
+                patient_data = pd.DataFrame({
+                    'Age': [age],
+                    'Sex': [sex],
+                    'BP': [bp],
+                    'Cholesterol': [cholesterol],
+                    'Na_to_K': [na_k_ratio]
+                })
+                
+                # Codificar datos
+                patient_encoded = patient_data.copy()
+                patient_encoded['Sex'] = self.encoders['sex'].transform([sex])[0]
+                patient_encoded['BP'] = self.encoders['bp'].transform([bp])[0]
+                patient_encoded['Cholesterol'] = self.encoders['cholesterol'].transform([cholesterol])[0]
+                
+                # Hacer predicciones con todos los modelos
+                st.write("### 🎯 Predicciones de los Modelos")
+                
+                predictions = {}
+                confidences = {}
+                
+                for name, model in self.best_models.items():
+                    # Seleccionar datos apropiados
+                    if name == 'Decision Tree':
+                        patient_input = patient_encoded.values
+                    else:
+                        patient_input = self.scalers['standard'].transform(patient_encoded.values)
+                    
+                    # Predicción
+                    pred_encoded = model.predict(patient_input)[0]
+                    pred_drug = self.encoders['drug'].inverse_transform([pred_encoded])[0]
+                    predictions[name] = pred_drug
+                    
+                    # Confianza (probabilidades)
+                    if hasattr(model, 'predict_proba'):
+                        proba = model.predict_proba(patient_input)[0]
+                        confidences[name] = max(proba)
+                
+                # Mostrar resultados
+                for name, pred in predictions.items():
+                    confidence = confidences.get(name, 0)
+                    
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{name}:** {pred}")
+                    with col2:
+                        if confidence > 0:
+                            st.write(f"Confianza: {confidence:.2%}")
+                
+                # Consenso de modelos
+                pred_counts = pd.Series(list(predictions.values())).value_counts()
+                most_common = pred_counts.index[0]
+                
+                st.success(f"### 🏆 Recomendación Final: **{most_common}**")
+                
+                if len(pred_counts) > 1:
+                    st.info(f"📊 Consenso: {pred_counts[most_common]}/{len(predictions)} modelos concuerdan")
+                
+                # Explicación de la recomendación
+                st.write("### 💡 Interpretación de la Recomendación")
+                
+                if 'Decision Tree' in self.best_models:
+                    # Mostrar el camino en el árbol de decisión
+                    dt_model = self.best_models['Decision Tree']
+                    leaf_id = dt_model.decision_path(patient_encoded.values).indices[-1]
+                    
+                    st.write("**Factores clave según el Árbol de Decisión:**")
+                    feature_importance = dt_model.feature_importances_
+                    top_features = sorted(zip(self.feature_names, feature_importance), 
+                                        key=lambda x: x[1], reverse=True)[:3]
+                    
+                    for feature, importance in top_features:
+                        if feature == 'Age':
+                            value = age
+                        elif feature == 'Sex':
+                            value = sex
+                        elif feature == 'BP':
+                            value = bp
+                        elif feature == 'Cholesterol':
+                            value = cholesterol
+                        else:  # Na_to_K
+                            value = na_k_ratio
+                        
+                        st.write(f"- **{feature}**: {value} (importancia: {importance:.3f})")
 
 def main():
-    """Función principal para ejecutar el sistema de clasificación"""
-    root = tk.Tk()
-    app = DiabetesClassificationSystem(root)
-    root.mainloop()
+    """
+    Función principal de la aplicación Streamlit.
+    """
+    st.title("🏥 Sistema de Predicción de Medicamentos")
+    st.markdown("""
+    ### 🎯 Aprendizaje de Machine Learning para Principiantes
+    
+    Esta aplicación demuestra cómo usar **modelos de caja blanca** para predecir 
+    medicamentos apropiados basándose en características de pacientes.
+    
+    **Modelos implementados:**
+    - 🌳 **Decision Tree**: Fácil de interpretar, muestra reglas de decisión
+    - 📈 **Logistic Regression**: Modelo lineal con coeficientes interpretables  
+    - 🎯 **Naive Bayes**: Modelo probabilístico basado en teorema de Bayes
+    """)
+    
+    # Inicializar el sistema
+    if 'drug_system' not in st.session_state:
+        st.session_state.drug_system = DrugPredictionSystem()
+    
+    system = st.session_state.drug_system
+    
+    # Sidebar para navegación
+    st.sidebar.title("🧭 Navegación")
+    option = st.sidebar.selectbox(
+        "Selecciona una sección:",
+        ["📁 Cargar Datos", "🔬 Entrenar Modelos", "🩺 Hacer Predicciones", "📚 Documentación"]
+    )
+    
+    if option == "📁 Cargar Datos":
+        st.header("📁 Carga y Exploración de Datos")
+        
+        # Opción para cargar archivo
+        uploaded_file = st.file_uploader(
+            "Sube tu archivo CSV del dataset de medicamentos",
+            type=['csv'],
+            help="El archivo debe contener las columnas: Age, Sex, BP, Cholesterol, Na_to_K, Drug"
+        )
+        
+        # Opción para generar datos de ejemplo
+        if st.button("🎲 Generar Datos de Ejemplo"):
+            # Crear dataset de ejemplo
+            np.random.seed(42)
+            n_samples = 200
+            
+            example_data = {
+                'Age': np.random.randint(20, 70, n_samples),
+                'Sex': np.random.choice(['M', 'F'], n_samples),
+                'BP': np.random.choice(['HIGH', 'NORMAL', 'LOW'], n_samples),
+                'Cholesterol': np.random.choice(['HIGH', 'NORMAL'], n_samples),
+                'Na_to_K': np.random.uniform(6, 38, n_samples),
+                'Drug': np.random.choice(['DrugY', 'drugA', 'drugB', 'drugC', 'drugX'], n_samples)
+            }
+            
+            st.session_state.df = pd.DataFrame(example_data)
+            uploaded_file = "example"
+        
+        if uploaded_file is not None:
+            if uploaded_file != "example":
+                df = pd.read_csv(uploaded_file)
+                st.session_state.df = df
+            else:
+                df = st.session_state.df
+            
+            st.success("✅ ¡Datos cargados exitosamente!")
+            
+            # Mostrar preview de los datos
+            st.subheader("👀 Vista Previa de los Datos")
+            st.dataframe(df.head(10), use_container_width=True)
+            
+            # Información del dataset
+            st.subheader("ℹ️ Información del Dataset")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Filas", len(df))
+            with col2:
+                st.metric("Columnas", len(df.columns))
+            with col3:
+                st.metric("Valores Nulos", df.isnull().sum().sum())
+            with col4:
+                st.metric("Medicamentos Únicos", df['Drug'].nunique())
+            
+            # Procesar datos
+            if st.button("🔄 Procesar Datos"):
+                with st.spinner("Procesando datos..."):
+                    X, y = system.load_and_preprocess_data(df)
+                    system.split_and_scale_data(X, y)
+                    st.session_state.data_processed = True
+                    st.success("✅ ¡Datos procesados y listos para entrenamiento!")
+    
+    elif option == "🔬 Entrenar Modelos":
+        st.header("🔬 Entrenamiento de Modelos de Machine Learning")
+        
+        if not hasattr(st.session_state, 'data_processed'):
+            st.warning("⚠️ Primero debes cargar y procesar los datos en la sección 'Cargar Datos'")
+            return
+        
+        if st.button("🚀 Entrenar Todos los Modelos"):
+            with st.spinner("Entrenando modelos... Esto puede tomar unos minutos."):
+                # Definir modelos y grids
+                system.define_models_and_grids()
+                
+                # Entrenar con grid search
+                results = system.train_models_with_grid_search()
+                st.session_state.training_results = results
+                
+                # Generar métricas detalladas
+                system.generate_detailed_metrics(results)
+                
+                # Visualizar interpretabilidad
+                system.visualize_model_interpretability()
+                
+                st.session_state.models_trained = True
+                st.balloons()
+                st.success("🎉 ¡Todos los modelos han sido entrenados exitosamente!")
+        
+        # Mostrar resultados si ya están entrenados
+        if hasattr(st.session_state, 'training_results'):
+            system.generate_detailed_metrics(st.session_state.training_results)
+            system.visualize_model_interpretability()
+    
+    elif option == "🩺 Hacer Predicciones":
+        st.header("🩺 Predicciones para Nuevos Pacientes")
+        
+        if not hasattr(st.session_state, 'models_trained'):
+            st.warning("⚠️ Primero debes entrenar los modelos en la sección 'Entrenar Modelos'")
+            return
+        
+        system.create_prediction_interface()
+    
+    elif option == "📚 Documentación":
+        st.header("📚 Documentación y Guía de Aprendizaje")
+        
+        st.markdown("""
+        ## 🎯 Objetivo del Proyecto
+        
+        Este sistema está diseñado para enseñar conceptos fundamentales de Machine Learning
+        usando un problema real de predicción de medicamentos.
+        
+        ## 🔍 Modelos de Caja Blanca Implementados
+        
+        ### 🌳 Decision Tree (Árbol de Decisión)
+        - **¿Cómo funciona?** Crea reglas de decisión simples basadas en las características
+        - **Interpretabilidad:** Muy alta - puedes ver exactamente qué decisiones toma
+        - **Ventajas:** Fácil de entender, no requiere escalado de datos
+        - **Desventajas:** Puede sobreajustarse fácilmente
+        
+        ### 📈 Logistic Regression (Regresión Logística)
+        - **¿Cómo funciona?** Encuentra la mejor línea para separar las clases
+        - **Interpretabilidad:** Alta - los coeficientes muestran la importancia de cada característica
+        - **Ventajas:** Rápido, estable, proporciona probabilidades
+        - **Desventajas:** Asume relaciones lineales
+        
+        ### 🎯 Naive Bayes
+        - **¿Cómo funciona?** Usa probabilidades condicionales (Teorema de Bayes)
+        - **Interpretabilidad:** Moderada - muestra probabilidades por característica
+        - **Ventajas:** Funciona bien con pocos datos, rápido
+        - **Desventajas:** Asume independencia entre características
+        
+        ## 📊 Métricas de Evaluación
+        
+        - **Accuracy (Precisión):** % de predicciones correctas
+        - **Precision:** De las predicciones positivas, % que son correctas
+        - **Recall:** De los casos positivos reales, % que fueron detectados
+        - **F1-Score:** Media armónica entre precision y recall
+        
+        ## 🔧 Técnicas Implementadas
+        
+        ### ✂️ División de Datos (80/20)
+        - 80% para entrenamiento
+        - 20% para prueba final
+        
+        ### 🔄 Validación Cruzada (K=5)
+        - Divide los datos de entrenamiento en 5 partes
+        - Entrena 5 veces, cada vez dejando una parte para validación
+        - Proporciona una estimación más robusta del rendimiento
+        
+        ### 🎛️ Grid Search
+        - Prueba automáticamente diferentes combinaciones de hiperparámetros
+        - Encuentra la mejor configuración para cada modelo
+        - Evita el proceso manual de prueba y error
+        
+        ## 💡 Consejos para Principiantes
+        
+        1. **Comienza simple:** Los modelos de caja blanca son perfectos para aprender
+        2. **Entiende tus datos:** Siempre explora antes de modelar
+        3. **No te obsesiones con la precisión:** La interpretabilidad también es importante
+        4. **Valida correctamente:** Usa validación cruzada para resultados confiables
+        5. **Compara modelos:** Diferentes modelos pueden ser mejores para diferentes problemas
+        
+        ## 🚀 Próximos Pasos
+        
+        1. Experimenta con diferentes conjuntos de datos
+        2. Prueba técnicas de ingeniería de características
+        3. Aprende sobre ensemble methods (Random Forest, etc.)
+        4. Explora modelos de caja negra (Neural Networks, SVM)
+        """)
 
 if __name__ == "__main__":
     main()
